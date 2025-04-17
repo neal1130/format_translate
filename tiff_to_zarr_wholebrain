@@ -1,0 +1,95 @@
+import os
+import numpy as np
+import tifffile
+import zarr
+from skimage.transform import resize
+import argparse
+from tqdm import tqdm
+import concurrent.futures
+
+def resize_chunk(chunk, resize_factors):
+    """
+    使用 skimage.transform.resize 對一個 chunk 做縮放。
+    """
+    return resize(
+        chunk,
+        output_shape=tuple(int(s * f) for s, f in zip(chunk.shape, resize_factors)),
+        order=0,  # 最近鄰插值
+        mode='reflect',
+        preserve_range=True
+    ).astype(chunk.dtype)
+
+def tiff_to_zarr(input_tiff_path, output_zarr_path, resized_to=None, batch_size=100, chunk_size=(128,128,128), compressor=None):
+    """
+    以分批方式將超大 3D TIFF 轉換為 Zarr 格式，
+    透過平行讀取每一批影像（使用 tifffile.imread(key=page_index)），
+    避免一次性讀取全部資料，也不共用同一個 TiffFile 物件，
+    並用 tqdm 顯示進度。
+    """
+    if not os.path.exists(input_tiff_path):
+        raise FileNotFoundError(f"The input TIFF file '{input_tiff_path}' does not exist.")
+
+    # 讀取 TIFF 檔案的 metadata（僅用來取得頁數、影像尺寸及 dtype）
+    print("讀取 TIFF 檔案的 metadata...")
+    with tifffile.TiffFile(input_tiff_path) as tiff:
+        n_pages = len(tiff.pages)
+        first_page = tiff.pages[0].asarray()
+        page_shape = first_page.shape
+        dtype = first_page.dtype
+    original_shape = (n_pages,) + page_shape
+    print(f"原始 TIFF 形狀: {original_shape}, dtype: {dtype}")
+
+    # 若指定縮放尺寸，則計算縮放因子
+    if resized_to is not None:
+        if len(resized_to) != 3:
+            raise ValueError("Resized shape 必須為 (depth, height, width)")
+        resize_factors = tuple(new_dim / old_dim for new_dim, old_dim in zip(resized_to, original_shape))
+        out_shape = resized_to
+        print(f"將影像縮放至: {resized_to}，縮放因子: {resize_factors}")
+    else:
+        resize_factors = None
+        out_shape = original_shape
+
+    # 建立 Zarr 陣列
+    zarr_output = zarr.open(output_zarr_path, mode='w', shape=out_shape, dtype=dtype, chunks=chunk_size, compressor=compressor)
+
+    current_index = 0
+    print("分批處理 TIFF 影像...")
+    # 使用批次與平行讀取來避免一次性載入所有頁面
+    for i in tqdm(range(0, n_pages, batch_size), desc="讀取與處理批次"):
+        indices = list(range(i, min(i + batch_size, n_pages)))
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # 每個執行緒獨立呼叫 tifffile.imread 讀取指定頁面
+            batch_images = list(executor.map(lambda idx: tifffile.imread(input_tiff_path, key=idx), indices))
+        batch_array = np.stack(batch_images, axis=0)
+        if resize_factors is not None:
+            batch_array = resize_chunk(batch_array, resize_factors)
+        zarr_output[current_index:current_index+batch_array.shape[0], :, :] = batch_array
+        current_index += batch_array.shape[0]
+
+    print(f"Zarr 檔案已儲存於: {output_zarr_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="將超大 3D TIFF 轉換成 Zarr 格式，使用分批平行讀取避免記憶體不足。")
+    parser.add_argument("tiff_path", type=str, help="輸入 3D TIFF 檔案路徑")
+    parser.add_argument("zarr_path", type=str, help="輸出 Zarr 檔案路徑")
+    parser.add_argument("--resized_shape", type=int, nargs='+', default=None, help="目標尺寸 (depth height width)，例如: 100 512 512。若不指定則不做縮放。")
+    parser.add_argument("--batch_size", type=int, default=100, help="每次處理的頁數")
+    parser.add_argument("--chunk_size", type=int, nargs='+', default=[128,128,128], help="Zarr 儲存區塊尺寸 (depth height width)")
+    parser.add_argument("--compressor", type=str, default=None, help="Zarr 壓縮器，例如 'blosc' 或 'zlib'，預設為 None")
+    args = parser.parse_args()
+
+    # 處理壓縮器選項
+    compressor = None
+    if args.compressor:
+        if args.compressor.lower() == 'blosc':
+            compressor = zarr.Blosc()
+        elif args.compressor.lower() == 'zlib':
+            compressor = zarr.Zlib()
+        else:
+            raise ValueError(f"不支援的 compressor: {args.compressor}")
+
+    chunk_size = tuple(args.chunk_size)
+    resized_shape = tuple(args.resized_shape) if args.resized_shape else None
+
+    tiff_to_zarr(args.tiff_path, args.zarr_path, resized_shape, args.batch_size, chunk_size, compressor)
