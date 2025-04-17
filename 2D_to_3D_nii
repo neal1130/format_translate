@@ -1,0 +1,33 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 26 12:06:30 2024
+
+@author: ChuLab
+"""
+
+import nibabel as nib
+import numpy as np
+import os
+
+folder_path = r'D:\kuo\k_1' # Path to your folder of 2D images
+output_folder = r'D:\kuo\k_2' # Path to save 3D images
+
+# List all nii.gz files in the folder
+files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.nii.gz')]
+files.sort()  # Ensure the files are sorted correctly
+c=1
+# Process every 10 files into one 3D volume
+for i in range(0, len(files), 10):
+    # Load 10 images
+   
+    images = [nib.load(f).get_fdata() for f in files[i:i+10]]
+    
+    # Stack images along a new axis to create a 3D volume
+    volume = np.stack(images, axis=-1)
+    
+    # Create a NIfTI image from the 3D array
+    img_3d = nib.Nifti1Image(volume, affine=np.eye(4))
+    
+    # Save the 3D image
+    nib.save(img_3d, os.path.join(output_folder, f'{c}_0000.nii.gz'))
+    c=c+1
