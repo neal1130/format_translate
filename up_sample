@@ -1,0 +1,51 @@
+import dask.array as da
+import tifffile
+from skimage.transform import resize
+from tqdm import tqdm
+import numpy as np 
+# 設定放大倍數
+z_scale = 2
+y_scale = 5
+x_scale = 5
+
+# 讀取原始檔案
+raw = tifffile.memmap(r'')
+Z, Y, X = raw.shape
+print(f"原始影像 shape: {raw.shape}")
+
+# 目標 shape
+target_shape = (Z * z_scale, Y * y_scale, X * x_scale)
+print(f"目標影像 shape: {target_shape}")
+
+# 設定 chunk 大小
+chunks = (100, Y, X)
+
+# 建立 Dask Array
+darr = da.from_array(raw, chunks=chunks)
+
+def upsample_block(block):
+    # 利用 np.repeat 沿著每個軸進行重複
+    up_block = np.repeat(block, z_scale, axis=0)
+    up_block = np.repeat(up_block, y_scale, axis=1)
+    up_block = np.repeat(up_block, x_scale, axis=2)
+    return up_block
+
+# 使用 map_blocks 做上採樣
+upsampled_darr = darr.map_blocks(
+    upsample_block, 
+    dtype=raw.dtype,
+    chunks=(chunks[0] * z_scale, Y * y_scale, X * x_scale)
+)
+
+# 寫入輸出檔案（逐塊處理）
+output_file = r''
+delayed_blocks = upsampled_darr.to_delayed().ravel()
+
+with tifffile.TiffWriter(output_file, bigtiff=True) as tif:
+    for block in tqdm(delayed_blocks, desc="Upsampling and writing", unit="block"):
+        block_result = block.compute()
+        for slice_img in block_result:
+            contiguous_slice = np.ascontiguousarray(slice_img)
+            tif.write(contiguous_slice, photometric='minisblack')
+
+print(f"✅ Upsampled 3D TIFF 已寫入：{output_file}")
