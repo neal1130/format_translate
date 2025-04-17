@@ -1,0 +1,50 @@
+import os
+import numpy as np
+from tifffile import imread, imwrite
+from tqdm import tqdm
+import concurrent.futures
+
+def convert_2d_to_3d_batch_memmap_parallel(folder, output_path, batch_size=50, temp_file='temp_mmap.dat'):
+    # 取得資料夾中所有 TIFF 檔案並排序
+    file_list = sorted([f for f in os.listdir(folder) if f.lower().endswith(('.tif', '.tiff'))])
+    if not file_list:
+        raise ValueError("在指定的資料夾中沒有找到 TIFF 影像。")
+    
+    # 以第一張影像取得尺寸與資料型態
+    first_img = imread(os.path.join(folder, file_list[0]))
+    total_slices = len(file_list)
+    shape = (total_slices,) + first_img.shape  # (depth, height, width)
+    dtype = first_img.dtype
+
+    # 建立記憶體映射陣列，指定 temp_file 為存放路徑
+    mm = np.memmap(temp_file, dtype=dtype, mode='w+', shape=shape)
+
+    for i in tqdm(range(0, total_slices, batch_size), desc="處理批次"):
+        batch_files = file_list[i:i+batch_size]
+        # 使用 ThreadPoolExecutor 平行讀取這個批次內的所有影像
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            batch_images = list(executor.map(lambda f: imread(os.path.join(folder, f)), batch_files))
+        batch_array = np.stack(batch_images, axis=0)
+        mm[i:i+batch_array.shape[0]] = batch_array
+
+    mm.flush()  # 確保所有資料寫入磁碟
+
+    # 將完整連續的 3D volume 寫入單一 TIFF 檔案（bigTiff 可處理大檔案）
+    imwrite(output_path, mm, bigtiff=True)
+    print(f"3D TIF 影像已儲存：{output_path}")
+
+    # 刪除暫存的 memmap 檔案
+    del mm  # 釋放 memmap 資源
+    if os.path.exists(temp_file):
+        os.remove(temp_file)
+        print(f"已刪除暫存檔案：{temp_file}")
+
+if __name__ == "__main__":
+    folder = input("請輸入包含 2D TIF 影像的資料夾路徑:\n")
+    output_path = input("請輸入輸出的 3D TIF 檔案完整路徑或輸出資料夾:\n")
+    # 如果 output_path 是資料夾，則自動指定檔案名稱
+    if os.path.isdir(output_path):
+        output_path = os.path.join(output_path, "3D.tif")
+    # 可指定 temp_file 的完整路徑，例如 "D:/temp/temp_mmap.dat"
+    temp_file = input("請輸入暫存檔案存放路徑及檔名（預設為 temp_mmap.dat）：\n") or "temp_mmap.dat"
+    convert_2d_to_3d_batch_memmap_parallel(folder, output_path, temp_file=temp_file)
